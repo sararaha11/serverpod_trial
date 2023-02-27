@@ -1,0 +1,16 @@
+version: 0.0
+os: linux
+files:
+  - source: /vendor/
+    destination: /home/ec2-user/serverpod/upload/vendor/
+  - source: /registration_server/
+    destination: /home/ec2-user/serverpod/upload/registration_server/
+hooks:
+  BeforeInstall:
+    - location: scripts/install_dependencies
+      timeout: 300
+      runas: root
+  ApplicationStart:
+    - location: scripts/start_server
+      timeout: 300
+      runas: root
