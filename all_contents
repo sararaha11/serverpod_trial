@@ -1,0 +1,979 @@
+File: 01.codecommitrepo.tf
+Contents:
+resource "aws_codecommit_repository" "code_repository" {
+  repository_name = "rollfi-app-repo"
+  description     = "Code repository for serverpod application"
+  default_branch  = "main"
+  tags = {
+    Project = "serverpod"
+    Type    = "code"
+  }
+}
+
+resource "aws_codecommit_repository" "infra_repository" {
+  repository_name = "rollfi-serverpod-infra-repo"
+  description     = "Infrastructure repository for serverpod application"
+  default_branch  = "main"
+  tags = {
+    Project = "serverpod"
+    Type    = "infrastructure"
+  }
+}
+File: 02.iam-codepipeline.tf
+Contents:
+resource "aws_iam_role" "codepipeline" {
+  name = "serverpod-codepipeline"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "codepipeline.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_policy" "codepipeline" {
+  name = "serverpod-codepipeline"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "codecommit:CancelUploadArchive",
+          "codecommit:GetBranch",
+          "codecommit:GetCommit",
+          "codecommit:GetUploadArchiveStatus",
+          "codecommit:UploadArchive"
+        ]
+        Effect   = "Allow"
+        Resource = aws_codecommit_repository.code.arn
+      },
+      {
+        Action = [
+          "codecommit:GetBranch",
+          "codecommit:GetCommit",
+          "codecommit:PutFile",
+          "codecommit:CreateBranch",
+          "codecommit:CreateCommit",
+          "codecommit:GetUploadArchiveStatus",
+          "codecommit:UploadArchive",
+          "codecommit:MergePullRequestByThreeWay"
+        ]
+        Effect   = "Allow"
+        Resource = aws_codecommit_repository.infrastructure.arn
+      },
+      {
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:GetBucketVersioning",
+          "s3:PutObject",
+          "s3:ListBucket",
+          "s3:DeleteObject",
+          "s3:PutObjectAcl",
+          "s3:GetBucketLocation",
+          "s3:GetObjectAcl",
+          "s3:GetObjectTagging",
+          "s3:GetObjectVersionAcl",
+          "s3:GetObjectVersionTagging",
+          "s3:GetLifecycleConfiguration",
+          "s3:PutLifecycleConfiguration"
+        ]
+        Effect   = "Allow"
+        Resource = "${aws_s3_bucket.artifacts.arn}/*"
+      },
+      {
+        Action = [
+          "cloudformation:CreateStack",
+          "cloudformation:DeleteStack",
+          "cloudformation:DescribeStacks",
+          "cloudformation:UpdateStack"
+        ]
+        Effect   = "Allow"
+        Resource = "*"
+      },
+      {
+        Action = [
+          "ecs:DescribeServices",
+          "ecs:UpdateService"
+        ]
+        Effect   = "Allow"
+        Resource = "*"
+      },
+      {
+        Action = [
+          "lambda:CreateFunction",
+          "lambda:DeleteFunction",
+          "lambda:GetFunction",
+          "lambda:UpdateFunctionCode",
+          "lambda:UpdateFunctionConfiguration"
+        ]
+        Effect   = "Allow"
+        Resource = "*"
+      },
+      {
+        Action = [
+          "iam:PassRole"
+        ]
+        Effect   = "Allow"
+        Resource = aws_iam_role.ecs_task_execution_role.arn
+      },
+      {
+        Action = [
+          "kms:Decrypt"
+        ]
+        Effect   = "Allow"
+        Resource = var.kms_key_arn
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "codepipeline" {
+  policy_arn = aws_iam_policy.codepipeline.arn
+  role       = aws_iam_role.codepipeline.name
+}
+File: 03.iam-atlantis.tf
+Contents:
+# Create IAM roles and policies for Atlantis
+resource "aws_iam_role" "atlantis_role" {
+  name = "serverpod-atlantis-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_policy" "atlantis_policy" {
+  name   = "serverpod-atlantis-policy"
+  policy = data.aws_iam_policy_document.atlantis_policy.json
+}
+
+resource "aws_iam_role_policy_attachment" "atlantis_role_policy_attachment" {
+  policy_arn = aws_iam_policy.atlantis_policy.arn
+  role       = aws_iam_role.atlantis_role.name
+}
+
+data "aws_iam_policy_document" "atlantis_policy" {
+  statement {
+    actions = [
+      "ec2:DescribeInstances",
+      "ec2:CreateTags",
+      "ec2:StartInstances",
+      "ec2:StopInstances",
+      "ec2:TerminateInstances"
+    ]
+
+    resources = [
+      "*"
+    ]
+
+    effect = "Allow"
+  }
+}
+File: 04.iam-codecommitusers.tf
+Contents:
+variable "pgp_key" {
+  default = "arn:aws:secretsmanager:us-east-1:970261989069:secret:common/pgp/iamusers-mhQSz7"
+}
+
+data "aws_iam_policy_document" "dev_branch_policy" {
+  statement {
+    sid    = "DevBranchAccess"
+    effect = "Allow"
+    actions = [
+      "codecommit:GitPush",
+    ]
+    resources = [
+      "${aws_codecommit_repository.infra_repo.arn}:refs/heads/featuredev",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${var.account_id}:group/developers", "arn:aws:iam::${var.account_id}:group/testers", "arn:aws:iam::${var.account_id}:group/leads"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "qa_branch_policy" {
+  statement {
+    sid    = "QaBranchAccess"
+    effect = "Allow"
+    actions = [
+      "codecommit:GitPush",
+    ]
+    resources = [
+      "${aws_codecommit_repository.infra_repo.arn}:refs/heads/featureqa",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${var.account_id}:group/testers", "arn:aws:iam::${var.account_id}:group/leads"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "prod_branch_policy" {
+  statement {
+    sid    = "ProdBranchAccess"
+    effect = "Allow"
+    actions = [
+      "codecommit:GitPush",
+    ]
+    resources = [
+      "${aws_codecommit_repository.infra_repo.arn}:refs/heads/featureprod",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${var.account_id}:group/leads"]
+    }
+  }
+}
+
+
+data "s3_bucket_object" "user_groups_file" {
+  bucket = var.s3_bucket_name
+  key    = var.s3_user_groups_file_key
+
+  depends_on = [
+    aws_s3_bucket_object.user_groups_file_upload
+  ]
+}
+
+locals {
+  user_groups = jsondecode(data.s3_bucket_object.user_groups_file.body)["users"]
+}
+
+resource "aws_iam_user" "iam_users" {
+  for_each = { for user in local.user_groups : user.username => user }
+
+  name = each.value.username
+  path = "/"
+
+  tags = {
+    FullName = each.value.full_name
+    Email    = each.value.email
+  }
+}
+
+resource "aws_iam_group" "iam_groups" {
+  for_each = { for user in local.user_groups : user.groups[*] => user.username }
+
+  name = each.key
+  path = "/"
+
+  tags = {
+    Environment = each.key
+  }
+}
+
+resource "aws_iam_user_group_membership" "iam_user_group_membership" {
+  for_each = { for user in local.user_groups : user.username => user }
+
+  user   = aws_iam_user.iam_users[each.key].name
+  groups = each.value.groups
+}
+
+resource "aws_access_key" "iam_user_access_keys" {
+  for_each = { for user in local.user_groups : user.username => user }
+
+  user    = aws_iam_user.iam_users[each.key].name
+  pgp_key = var.pgp_key
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_secretsmanager_secret" "iam_user_secrets" {
+  for_each = { for user in local.user_groups : user.username => user }
+
+  name = "${var.project_name}-iam-user-secret-${each.key}"
+
+  tags = {
+    FullName = each.value.fullname
+    Email    = each.value.email
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "iam_user_secret_versions" {
+  for_each = { for user in local.user_groups : user.username => user }
+
+  secret_id = aws_secretsmanager_secret.iam_user_secrets[each.key].id
+  secret_string = jsonencode({
+    access_key = aws_access_key.iam_user_access_keys[each.key].id
+    secret_key = aws_access_key.iam_user_access_keys[each.key].secret
+  })
+}
+
+resource "aws_sns_topic" "serverpod-project-sns-topic" {
+  name = "serverpod-project-sns-topic"
+}
+
+resource "aws_sns_topic_subscription" "email_subscriptions" {
+  for_each = {for user_group in local.user_groups: user_group.email => user_group}
+
+  topic_arn = aws_sns_topic.pipeline.arn
+  protocol  = "email"
+  endpoint  = each.key
+}
+
+/*resource "aws_sns_topic_subscription" "email" {
+  count         = length(local.user_group)
+  topic_arn     = aws_sns_topic.example.arn
+  protocol      = "email"
+  endpoint      = local.user_group[count.index]["email"]
+}*/
+
+data "aws_sns_topic" "serverpod-project-sns-topic" {
+  name = "serverpod-project-sns-topic"
+}
+
+resource "aws_sns_topic_policy" "serverpod-project-sns-topic-policy" {
+  arn = data.aws_sns_topic.serverpod-project-sns-topic.arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "ses.amazonaws.com"
+        }
+        Action = "sns:Publish"
+        Resource = data.aws_sns_topic.serverpod-project-sns-topic.arn
+        Condition = {
+          ArnEquals = {
+            "aws:SourceArn" = "arn:aws:ses:${var.region}:${var.account_id}:identity/*"
+          }
+        }
+      }
+    ]
+  })
+}
+File: 05.a.codepipleline.tf
+Contents:
+# Define the S3 bucket that will be used to store the pipeline artifacts
+resource "aws_s3_bucket" "pipeline_artifacts_bucket" {
+  bucket = "serverpod-pipeline-artifacts-${var.environment}"
+}
+
+# Define the CodePipeline
+
+variable "project_name" {
+  type = string
+}
+
+variable "repo_name" {
+  type = string
+}
+
+variable "environments" {
+  type    = list(string)
+  default = ["dev", "qa", "prod"]
+}
+
+resource "aws_codepipeline" "pipeline" {
+  count = length(var.environments)
+
+  name = "pipeline-${var.environments[count.index]}"
+
+  role_arn = aws_iam_role.pipeline.arn
+
+  artifact_store {
+    location = aws_s3_bucket.artifacts.bucket
+    type     = "S3"
+  }
+
+  stage {
+    name = "Source"
+
+    action {
+      name             = "Source"
+      category         = "Source"
+      owner            = "AWS"
+      provider         = "CodeCommit"
+      version          = "1"
+      output_artifacts = ["source_output"]
+      configuration {
+        RepositoryName = var.repo_name
+        BranchName     = var.environments[count.index]
+      }
+    }
+  }
+
+  stage {
+    name = "Build"
+
+    action {
+      name             = "Build"
+      category         = "Build"
+      owner            = "AWS"
+      provider         = "CodeBuild"
+      version          = "1"
+      input_artifacts  = ["source_output"]
+      output_artifacts = ["build_output"]
+      configuration {
+        ProjectName = var.project_name
+      }
+    }
+  }
+
+  stage {
+    name = "Deploy"
+
+    action {
+      name            = "Deploy"
+      category        = "Deploy"
+      owner           = "AWS"
+      provider        = "ManualApproval"
+      input_artifacts = ["build_output"]
+      configuration {
+        NotificationArn = aws_sns_topic.pipeline.arn
+        CustomData      = "Please review and approve this deployment."
+      }
+    }
+
+    action {
+      name            = "Atlantis"
+      category        = "Deploy"
+      owner           = "AWS"
+      provider        = "Lambda"
+      version         = "1"
+      input_artifacts = ["source_output"]
+      configuration {
+        FunctionName = aws_lambda_function.atlantis.function_name
+        UserParameters = jsonencode({
+          PLANFILE_S3_BUCKET = aws_s3_bucket.atlantis_planfiles.bucket
+          PLANFILE_S3_KEY    = "${var.environments[count.index]}-${var.project_name}-${var.repo_name}-${local.timestamp}-plan"
+          APPROVAL_COUNT     = var.environments[count.index] == "dev" ? 1 : 2
+        })
+      }
+    }
+  }
+}
+
+output "pipeline_names" {
+  value = aws_codepipeline.pipeline[*].name
+}
+
+# Create the CodePipeline webhook for GitHub
+resource "aws_codepipeline_webhook" "app_github_webhook" {
+  name            = "app-github-webhook"
+  target_pipeline = aws_codepipeline.app_pipeline.name
+  authentication {
+    type = "GITHUB_HMAC"
+  }
+  authentication_configuration {
+    secret_token = var.github_webhook_secret
+  }
+  target_action {
+    category = "Source"
+    owner    = "AWS"
+    provider = "CodeCommit"
+    version  = "1"
+  }
+}
+File: 05.b.codepiplineresources.tf
+Contents:
+# Create the CodePipeline resources for the app module
+module "app_pipeline" {
+  source               = "./modules/codepipeline"
+  name                 = "serverpod-app-pipeline"
+  codecommit_repo_name = aws_codecommit_repository.app.name
+  artifacts_bucket     = aws_s3_bucket.app_bucket.bucket
+  source_branch        = "main"
+  deploy_dev           = true
+  deploy_qa            = true
+  deploy_prod          = true
+  dev_account_id       = var.dev_account_id
+  qa_account_id        = var.qa_account_id
+  prod_account_id      = var.prod_account_id
+}
+File: 06.main.tf
+Contents:
+module "infra" {
+  source = "../infra"
+
+  # Input variables for infrastructure module
+  vpc_cidr_block             = var.vpc_cidr_block
+  public_subnet_cidr_blocks  = var.public_subnet_cidr_blocks
+  private_subnet_cidr_blocks = var.private_subnet_cidr_blocks
+  key_name                   = var.key_name
+}
+
+resource "aws_s3_bucket_object" "app_archive" {
+  depends_on = [module.infra]
+  bucket     = module.infra.app_bucket_id
+  key        = "${var.app_name}/${var.app_version}.zip"
+  source     = "${path.cwd}/app/app.zip"
+  etag       = filemd5("${path.cwd}/app/app.zip")
+}
+
+resource "aws_codedeploy_deployment_group" "app_deploy_group" {
+  depends_on             = [aws_codedeploy_application.app_deploy_app]
+  app_name               = aws_codedeploy_application.app_deploy_app.name
+  deployment_group_name  = var.environment == "prod" ? "${var.app_name}-prod" : "${var.app_name}-${var.environment}"
+  deployment_config_name = "CodeDeployDefault.OneAtATime"
+  service_role_arn       = aws_iam_role.codepipeline.arn
+  auto_rollback_configuration {
+    enabled = true
+    events  = ["DEPLOYMENT_FAILURE"]
+  }
+
+  app_specification {
+    content {
+      content_type = aws_codedeploy_app_spec.app_spec.content_type
+      data         = aws_codedeploy_app_spec.app_spec.content
+    }
+  }
+
+  blue_green_deployment_config {
+    terminate_blue_instances_on_deployment_success {
+      action                           = "TERMINATE"
+      termination_wait_time_in_minutes = 5
+    }
+    deployment_ready_option {
+      action_on_timeout = "CONTINUE_DEPLOYMENT"
+    }
+    green_fleet_provisioning_option {
+      action = "DISCOVER_EXISTING"
+    }
+  }
+
+  load_balancer_info {
+    target_group_info {
+      name = module.infra.app_target_group_name
+    }
+  }
+
+  deployment_style {
+    deployment_type   = "BLUE_GREEN"
+    deployment_option = "WITH_TRAFFIC_CONTROL"
+  }
+
+  ec2_tag_set {
+    ec2_tag_set_list {
+      ec2_tag_group {
+        key   = "Name"
+        value = var.environment == "prod" ? "${var.app_name}-prod" : "${var.app_name}-${var.environment}"
+      }
+      ec2_tag_group {
+        key   = "Environment"
+        value = var.environment
+      }
+    }
+  }
+}
+
+resource "aws_codedeploy_deployment_config" "app_deployment_config" {
+  deployment_config_name = "CodeDeployDefault.OneAtATime"
+}
+
+resource "aws_codedeploy_app_spec" "app_spec" {
+  content_type = "application/json"
+  content = templatefile("${path.module}/appspec.json.tpl",
+    {
+      app_name     = var.app_name
+      app_version  = var.app_version
+      environment  = var.environment
+      infra_bucket = module.infra.infra_bucket_id
+  })
+}
+
+resource "aws_s3_bucket_object" "app_spec" {
+  depends_on = [module.infra]
+  bucket     = module.infra.infra_bucket_id
+  key        = "appspec/${var.app_name}_${var.app_version}.json"
+  source     = "${path.module}/appspec.json.tpl"
+}
+File: 99.temp.tf
+Contents:
+File: atlantis.tf
+Contents:
+data "aws_caller_identity" "current" {}
+
+resource "aws_iam_role" "atlantis" {
+  name = "atlantis-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+data "aws_iam_policy_document" "atlantis" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:PutObject",
+      "s3:GetObject",
+      "s3:GetBucketLocation",
+      "s3:ListBucket"
+    ]
+    resources = [
+      "${var.s3_bucket_name}/*",
+      var.s3_bucket_name
+    ]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:ListAllMyBuckets"
+    ]
+    resources = [
+      "arn:aws:s3:::*"
+    ]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "sns:Publish",
+      "sns:Subscribe",
+      "sns:Unsubscribe"
+    ]
+    resources = [
+      aws_sns_topic.atlantis_approval_dev.arn,
+      aws_sns_topic.atlantis_approval_qa.arn,
+      aws_sns_topic.atlantis_approval_prod.arn
+    ]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "iam:PassRole"
+    ]
+    resources = [
+      aws_iam_role.atlantis.arn
+    ]
+  }
+}
+
+resource "aws_iam_policy" "atlantis" {
+  name   = "atlantis-policy"
+  policy = data.aws_iam_policy_document.atlantis.json
+}
+
+resource "aws_iam_role_policy_attachment" "atlantis" {
+  policy_arn = aws_iam_policy.atlantis.arn
+  role       = aws_iam_role.atlantis.name
+}
+
+resource "aws_lambda_function" "atlantis" {
+  filename      = "atlantis.zip"
+  function_name = "atlantis"
+  role          = aws_iam_role.atlantis.arn
+  handler       = "main"
+  runtime       = "go1.x"
+  timeout       = 300
+
+  environment {
+    variables = {
+      AWS_DEFAULT_REGION   = var.region
+      ATLANTIS_S3_BUCKET   = var.s3_bucket_name
+      ATLANTIS_ENVIRONMENT = var.environment
+    }
+  }
+
+  source_code_hash = filebase64sha256("atlantis.zip")
+}
+
+resource "aws_lambda_permission" "atlantis" {
+  statement_id  = "AllowExecutionFromAPIGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.atlantis.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = aws_api_gateway_deployment.atlantis.execution_arn
+}
+
+resource "aws_api_gateway_rest_api" "atlantis" {
+  name        = "atlantis"
+  description = "API Gateway for Atlantis"
+}
+
+resource "aws_api_gateway_resource" "atlantis" {
+  rest_api_id = aws_api_gateway_rest_api.atlantis.id
+  parent_id   = aws_api_gateway_rest_api.atlantis.root_resource_id
+  path_part   = "{proxy+}"
+}
+
+resource "aws_api_gateway_method" "atlantis" {
+  rest_api_id   = aws_api_gateway_rest_api.atlantis.id
+  resource_id   = aws_api_gateway_resource.atlantis.id
+  http_method   = "ANY"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "atlantis" {
+  rest_api_id             = aws_api_gateway_rest_api.atlantis.id
+  resource_id             = aws_api_gateway_resource.atlantis.id
+  http_method             = aws_api_gateway_method.atlantis.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.atlantis.invoke_arn
+}
+
+resource "aws_api_gateway_deployment" "atlantis" {
+  rest_api_id = aws_api_gateway_rest_api.atlantis.id
+  stage_name  = "dev"
+  depends_on  = [aws_api_gateway_integration.atlantis]
+}
+
+resource "aws_sns_topic" "atlantis_approval_dev" {
+  name = "atlantis-approval-dev"
+}
+
+resource "aws_sns_topic" "atlantis_approval_qa" {
+  name = "atlantis-approval-qa"
+}
+
+resource "aws_sns_topic" "atlantis_approval_prod" {
+  name = "atlantis-approval-prod"
+}
+
+resource "aws_sns_topic_policy" "atlantis_approval_dev" {
+  arn = aws_sns_topic.atlantis_approval_dev.arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowSNSPublishFromLambda"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+        Action   = "sns:Publish"
+        Resource = aws_sns_topic.atlantis_approval_dev.arn
+      },
+      {
+        Sid    = "AllowSNSSubscription"
+        Effect = "Allow"
+        Principal = {
+          AWS = "*"
+        }
+        Action = [
+          "sns:Subscribe",
+          "sns:Unsubscribe"
+        ]
+        Resource = aws_sns_topic.atlantis_approval_dev.arn
+        Condition = {
+          StringEquals = {
+            "aws:SourceOwner" = data.aws_caller_identity.current.account_id
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_sns_topic_policy" "atlantis_approval_qa" {
+  arn = aws_sns_topic.atlantis_approval_qa.arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowSNSPublishFromLambda"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+        Action   = "sns:Publish"
+        Resource = aws_sns_topic.atlantis_approval_qa.arn
+      },
+      {
+        Sid    = "AllowSNSSubscription"
+        Effect = "Allow"
+        Principal = {
+          AWS = "*"
+        }
+        Action = [
+          "sns:Subscribe",
+          "sns:Unsubscribe"
+        ]
+        Resource = aws_sns_topic.atlantis_approval_qa.arn
+        Condition = {
+          StringEquals = {
+            "aws:SourceOwner" = data.aws_caller_identity.current.account_id
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_sns_topic_policy" "atlantis_approval_prod" {
+  arn = aws_sns_topic.atlantis_approval_prod.arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowSNSPublishFromLambda"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+        Action   = "sns:Publish"
+        Resource = aws_sns_topic.atlantis_approval_prod.arn
+      },
+      {
+        Sid    = "AllowSNSSubscription"
+        Effect = "Allow"
+        Principal = {
+          AWS = "*"
+        }
+        Action = [
+          "sns:Subscribe",
+          "sns:Unsubscribe"
+        ]
+        Resource = aws_sns_topic.atlantis_approval_prod.arn
+        Condition = {
+          StringEquals = {
+            "aws:SourceOwner" = data.aws_caller_identity.current.account_id
+          }
+        }
+      },
+      {
+        Sid    = "AllowSNSTriggerLambdaFunction"
+        Effect = "Allow"
+        Principal = {
+          AWS = "*"
+        }
+        Action   = "lambda:InvokeFunction"
+        Resource = aws_lambda_function.atlantis.arn
+        Condition = {
+          ArnLike = {
+            "aws:SourceArn" = aws_sns_topic.atlantis_approval_prod.arn
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_s3_bucket_object" "atlantis_policy" {
+  bucket = var.s3_bucket_name
+  key    = "atlantis_policy.json"
+  source = "atlantis_policy.json"
+  etag   = filemd5("atlantis_policy.json")
+}
+
+resource "aws_s3_bucket_policy" "atlantis" {
+  bucket = var.s3_bucket_name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AllowS3GetObject"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "s3:GetObject"
+        Resource  = "${var.s3_bucket_arn}/*"
+        Condition = {
+          StringEquals = {
+            "aws:SourceArn" = aws_sns_topic.atlantis_approval_dev.arn
+          }
+        }
+      },
+      {
+        Sid       = "AllowS3PutObject"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "s3:PutObject"
+        Resource  = "${var.s3_bucket_arn}/*"
+        Condition = {
+          StringEquals = {
+            "aws:SourceArn" = aws_sns_topic.atlantis_approval_dev.arn
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_policy_attachment" "codepipeline" {
+  policy_arn = "arn:aws:iam::aws:policy/AWSCodePipelineFullAccess"
+  roles      = [aws_iam_role.codepipeline.name]
+}
+
+resource "aws_iam_user" "atlantis" {
+  name = "atlantis"
+}
+
+resource "aws_iam_user_policy_attachment" "atlantis" {
+  user       = aws_iam_user.atlantis.name
+  policy_arn = aws_iam_policy.atlantis.arn
+}
+
+/*resource "aws_iam_policy" "atlantis" {
+  name = "atlantis"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AllowAssumeRole"
+        Effect   = "Allow"
+        Action   = "sts:AssumeRole"
+        Resource = aws_iam_role.atlantis.arn
+      }
+    ]
+  })
+}
+*/
+
+resource "aws_iam_access_key" "atlantis" {
+  user = aws_iam_user.atlantis.name
+}
+
+resource "aws_secretsmanager_secret" "atlantis_access_key" {
+  name = "atlantis_access_key"
+}
+
+resource "aws_secretsmanager_secret_version" "atlantis_access_key" {
+  secret_id = aws_secretsmanager_secret.atlantis_access_key.id
+  secret_string = jsonencode({
+    access_key = aws_iam_access_key.atlantis.id
+    secret_key = aws_iam_access_key.atlantis.secret
+  })
+}
+
+resource "aws_s3_bucket_notification" "atlantis_policy" {
+  bucket = var.s3_bucket_name
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.atlantis.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "atlantis_policy.json"
+  }
+}
+
+
+resource "random_password" "webhook_secret" {
+  length  = 32
+  special = true
+}
